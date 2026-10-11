@@ -10,11 +10,17 @@ screen and reacts when you tilt or shake the board. My twist: a **STOCKS screen*
 that shows live prices, the day's change and a sparkline for a watchlist of
 tickers, fetched over WiFi.
 
-<!-- Add your renders here once you have them:
+## Gallery
+
 ![Schematic](Renders/schematic.png)
-![PCB](Renders/pcb.png)
-![3D view](Renders/3d.png)
--->
+![Schematic sketch](Renders/schmaticsketch.jpeg)
+![PCB layout (2D)](Renders/kitcar2dfullpagepcb.jpeg)
+![PCB layout, close up](Renders/kitcar2dsmall.jpeg)
+![3D view](Renders/kitcar3dviewgreenflat.jpeg)
+![3D bird's-eye view](Renders/kitcarbirdseye.jpeg)
+
+The board is shaped like a small sports car. The renders show a green solder
+mask; the plan for the real board is blue with white silkscreen.
 
 ## Features
 
