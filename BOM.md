@@ -20,7 +20,6 @@
 | [Keycaps](https://www.amazon.com/dp/B0CQ2VLMVY) | Caps for the two switches | 2 | $0.60 | $1.20 | [Amazon](https://www.amazon.com/dp/B0CQ2VLMVY) |
 | [10k Resistor](https://www.amazon.com/dp/B0B4JFPHTW) | Pull-up resistor for the DHT11 data line | 1 | $0.05 | $0.05 | [Amazon](https://www.amazon.com/dp/B0B4JFPHTW) |
 | [PCB](https://www.jlcpcb.com/) | Custom board that holds and connects everything, made by JLCPCB | 1 | $10.00 | $10.00 | [JLCPCB](https://www.jlcpcb.com/) |
-| Parts total | — | 1 | $0.00 | $0.00 | — |
 | **Parts subtotal** | — | — | — | **$24.72** | — |
 | **Tax & shipping** | — | — | — | **$0.00** | — |
 | **Total** | — | — | — | **$24.72** | — |
