@@ -22,7 +22,7 @@
 | [PCB](https://www.jlcpcb.com/) | Custom board that holds and connects everything, made by JLCPCB | 1 | $5.30 | $5.30 | [JLCPCB](https://www.jlcpcb.com/) |
 | [10PCS 2.54mm 40 Pin Breakaway Male Female Header Pins](https://www.amazon.com/Neprift-2-54mm-Breakaway-Female-Header/dp/B0GX55WYSX?crid=12DDKN36O1P7I&dib=eyJ2IjoiMSJ9.t5P5baIavb6XX1sfIcxbVRdVAs8-TSdG86Iy5TaO5n5lkhQxaI7WWu3a5UYu0tPDWKQp80dkjxE0Jf8JK0Y4sSg-BUMThJcAdy6G61BasS5RVlyWsJHvYvOywr5sESdV4pzRlEi6qKM9Cw4C-4G1vEYU2tLPbzudxTM_05vjS4eR5lpa57bGhrhv7lfG8daq3q3hNsT8Ya0JF4ER-VqJT1SHYuNx8eBh3Mm4QV63yAw.BSflk0f1UWUeTcgLyPg9Bm-UwDfK94zY_0kYy8F1u1I&dib_tag=se&keywords=one+pack+of+40-pin+female+strips+that+you+snap+or+cut+to+length.&nsdOptOutParam=true&qid=1791775454&sprefix=one+pack+of+40-pin+female+strips+that+you+snap+or+cut+to+length.%2Caps%2C184&sr=8-5) | to attach and detach parts so it is modular | 1 | $4.59 | $4.59 | [Neprift](https://www.amazon.com/Neprift-2-54mm-Breakaway-Female-Header/dp/B0GX55WYSX?crid=12DDKN36O1P7I&dib=eyJ2IjoiMSJ9.t5P5baIavb6XX1sfIcxbVRdVAs8-TSdG86Iy5TaO5n5lkhQxaI7WWu3a5UYu0tPDWKQp80dkjxE0Jf8JK0Y4sSg-BUMThJcAdy6G61BasS5RVlyWsJHvYvOywr5sESdV4pzRlEi6qKM9Cw4C-4G1vEYU2tLPbzudxTM_05vjS4eR5lpa57bGhrhv7lfG8daq3q3hNsT8Ya0JF4ER-VqJT1SHYuNx8eBh3Mm4QV63yAw.BSflk0f1UWUeTcgLyPg9Bm-UwDfK94zY_0kYy8F1u1I&dib_tag=se&keywords=one+pack+of+40-pin+female+strips+that+you+snap+or+cut+to+length.&nsdOptOutParam=true&qid=1791775454&sprefix=one+pack+of+40-pin+female+strips+that+you+snap+or+cut+to+length.%2Caps%2C184&sr=8-5) |
 | **Parts subtotal** | — | — | — | **$52.10** | — |
-| **Tax & shipping** | — | — | — | **$0.00** | — |
-| **Total** | — | — | — | **$52.10** | — |
+| **Tax & shipping** | — | — | — | **$7.38** | — |
+| **Total** | — | — | — | **$59.48** | — |
 
-$12.90 left of the tier's funding.
+$5.52 left of the tier's funding.
