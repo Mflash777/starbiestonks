@@ -10,12 +10,12 @@
 
 | Week | Tier | Hours logged | Entries |
 | --- | --- | --- | --- |
-| Week 1 | Tier 2 | 16h | 2 |
+| Week 1 | Tier 2 | 19h | 2 |
 
 ## Contents
 
 1. [2026-10-11 – ## Learning PCB design and drawing my first board](#2026-10-11-learning-pcb-design-and-drawing-my-first-board)
-2. [2026-10-11 – ## Building the firmware, redesigning the board as a car, and reorganizing my GitHub](#2026-10-11-building-the-firmware-redesigning-the-board-as-a-)
+2. [2026-10-11 – ![kitcar2dfullpagepcb](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/708af421a4ed284d4415e2f5753851427700bfe1515f3a62670962a06cf1ee08.jpg)](#2026-10-11-kitcar2dfullpagepcbhttpshalflifehackclub-assetsco)
 
 ## Design
 
@@ -108,9 +108,11 @@ Next I want to turn it into a car board with a car AI character, finalize the BO
 
 ![githuborgnialimg](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/a88821f2129a40b2ee432ad2971038b55ef910e2d2367c62929c549388617ee5.jpg)
 
-### 2026-10-11 – ## Building the firmware, redesigning the board as a car, and reorganizing my GitHub
+### 2026-10-11 – ![kitcar2dfullpagepcb](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/708af421a4ed284d4415e2f5753851427700bfe1515f3a62670962a06cf1ee08.jpg)
 
-**6h**
+**9h**
+
+![kitcar2dfullpagepcb](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/708af421a4ed284d4415e2f5753851427700bfe1515f3a62670962a06cf1ee08.jpg)
 
 ## Building the firmware, redesigning the board as a car, and reorganizing my GitHub
 
@@ -170,3 +172,7 @@ Next I want to finalize the BOM prices, add the playable car character to the co
 ![listoffilesinthegithub](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/6f72a9680d17328b3f8781b700800e72a1eac2684c951e87357b009049fab8ab.jpg)
 
 ![readdmeforfinalgithubstonk](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/fffdef9485234dfdbd6ccb03070b80817ba677f5b2206db42d1cc165d0f809cf.jpg)
+
+![codetousewifiandupdatethecar](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/ed138212116837a294c1fc9649f3934f237f41d1efb9d658d8f8d77e982a5b0f.jpg)
+
+![partofstockrunnigncode](https://halflife.hackclub-assets.com/hackclub-half-life/sessions/Av04i46we8M37lS6usKkrddBHAP0IRTt/32794c7f71d7ab833ea4f5b30b5351d118cbbf9215853316bbdae6cb450504d1.jpg)
