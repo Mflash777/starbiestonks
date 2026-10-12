@@ -1,1010 +1,824 @@
 /*
-  Starbie Stocks: Starbie, but it watches the market for you. (File: Starbie.ino)
+  Starbie  -  talking car + gyro steering wheel + live stocks
+  Hack Club Half-Life, Week 1
 
-  This is the original Starbie firmware (pet, radial menu, stats, shake) with
-  one new screen: a live stock ticker with price, daily change and a
-  sparkline of today's price action. Prices come over WiFi from Yahoo Finance.
+  Hardware (matches the PCB):
+    XIAO ESP32-C3
+    SSD1306 128x64 OLED  (I2C 0x3C)   SDA = GPIO6 (D4), SCL = GPIO7 (D5)
+    MPU6050 gyro/accel   (I2C 0x68)   same I2C bus
+    DHT11                              GPIO3 (D1)
+    BTN1                               GPIO4 (D2)  -> to GND
+    BTN2                               GPIO5 (D3)  -> to GND
 
-  Install these libraries with Sketch > Include Library > Manage Libraries:
-    - Adafruit GFX Library
-    - Adafruit SSD1306
-    - Adafruit MPU6050
-    - DHT sensor library
-    - ArduinoJson (by Benoit Blanchon, version 7.x)   <-- new
-  Board: esp32 by Espressif Systems > XIAO_ESP32C3
+  Views (exactly four, so the menu stays at four items):
+    CAR     talking car + steering wheel that turns with the board
+    DRIVE   tilt-to-steer driving game
+    STOCKS  live prices + sparkline chart
+    STATS   temperature, humidity, tilt, wheel angle
 
-  Controls
-    Button 2: cycle screens  STOCKS -> PET -> STATS -> STOCKS
-    Button 1: on the STOCKS screen, jump to the next ticker.
-              On the PET / STATS screens, open the radial menu (as before).
-    Shake:    still makes the pet happy (PET screen only).
+  Buttons:
+    BTN1 short  = next view
+    BTN1 long   = re-centre the steering wheel (hold ~0.7 s)
+    BTN2 short  = action in the view (poke car / restart game / next ticker / re-centre)
+
+  Libraries (Library Manager):
+    Adafruit GFX Library, Adafruit SSD1306, Adafruit MPU6050,
+    Adafruit Unified Sensor, DHT sensor library, ArduinoJson (version 7)
+  Board: "XIAO_ESP32C3"   (Tools > USB CDC On Boot > Enabled if you want Serial output)
+
+  Stock data comes from Yahoo's public chart endpoint. It is unofficial, can change
+  or rate-limit, and is for fun only - NOT financial advice.
 */
 
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
 #include <DHT.h>
-#include <Preferences.h>
-#include <math.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 
-// =========================== BEGINNER SETTINGS ===========================
-// Everything most builders will want to customize is in this one section.
+// ============================ SETTINGS (edit these) ============================
+const char* WIFI_SSID = "YOUR_WIFI_NAME";       // keep real passwords OUT of GitHub!
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
-// --- WiFi and stocks (NEW) ------------------------------------------------
-// The ESP32-C3 only supports 2.4 GHz WiFi.
-const char *WIFI_SSID = "YOUR_WIFI_NAME";
-const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* TICKERS[] = { "TSLA", "RACE", "NVDA", "AAPL" };   // up to 8, 5 chars max each
+const int   NUM_TICKERS = 4;
 
-// Any Yahoo Finance symbol works. Examples:
-//   Indexes: "^GSPC" (S&P 500), "^IXIC" (Nasdaq), "^NSEI" (Nifty 50)
-//   Crypto:  "BTC-USD", "ETH-USD"
-//   Other exchanges: "RELIANCE.NS" (NSE India), "SHOP.TO" (Toronto)
-const char *TICKERS[] = {"AAPL", "MSFT", "NVDA", "^GSPC"};
+// How the board is held while steering:
+//   1 = upright, like a real steering wheel (screen facing you, you rotate it)
+//   0 = flat on the desk, tilt left/right
+#define STEER_UPRIGHT 1
 
-// How often to refresh every ticker (milliseconds). Be kind to Yahoo:
-// once a minute is plenty.
-const uint32_t STOCK_REFRESH_MS = 60000;
+// If the wheel turns the WRONG way on screen, flip this between 1 and -1.
+#define STEER_SIGN  -1
+// If the wheel jitters / fights itself (gyro and accelerometer disagree), flip this.
+#define GYRO_SIGN    1
+// ===============================================================================
 
-// On the STOCKS screen, move to the next ticker by itself every N ms.
-// Set to 0 to only change tickers with Button 1.
-const uint32_t AUTO_ROTATE_MS = 8000;
+#define SDA_PIN  6
+#define SCL_PIN  7
+#define DHT_PIN  3
+#define BTN1_PIN 4
+#define BTN2_PIN 5
 
-// Set to false to boot into the pet screen instead of the stock screen.
-const bool START_ON_STOCKS = true;
+#define SCREEN_W 128
+#define SCREEN_H 64
+#define POINTS   48                 // chart points kept per ticker
 
-// --- Your board's pins ----------------------------------------------------
-// These are ESP32-C3 GPIO numbers, with the XIAO pin labels beside them.
-const int I2C_SDA_PIN = 6;       // XIAO D4: OLED + MPU6050 SDA
-const int I2C_SCL_PIN = 7;       // XIAO D5: OLED + MPU6050 SCL
-const int DHT_PIN = 3;           // XIAO D1: DHT11 data
-const int BUTTON_ONE_PIN = 4;    // XIAO D2: opens/confirms the radial menu
-const int BUTTON_TWO_PIN = 5;    // XIAO D3: cycles screens
-
-// Set this to false if your submission does not have a DHT11.
-const bool USE_DHT11 = true;
-
-// Most parts use these addresses. Only change them if an I2C scanner says
-// your part is different (common OLED alternative: 0x3D).
-const uint8_t OLED_ADDRESS = 0x3C;
-const uint8_t MPU6050_ADDRESS = 0x68;
-
-// --- Starting stats -------------------------------------------------------
-// Stats are 0 to 100. They only change when you select an action or shake
-// Starbie; nothing slowly drains while it sits on your desk.
-const int STARTING_JOY = 70;
-const int STARTING_ENERGY = 75;
-const int STARTING_FULLNESS = 65;
-
-// Set true, upload once, then set it back to false if you want a fresh pet.
-const bool RESET_SAVED_PET_ON_BOOT = false;
-
-// --- Radial menu ----------------------------------------------------------
-// These four actions appear at TOP, RIGHT, BOTTOM, then LEFT in the menu.
-// The last word controls the matching little visual reaction.
-enum PetReaction {
-  NAP_REACTION,
-  JUMP_REACTION,
-  HEART_REACTION,
-  RUN_REACTION,
-};
-
-struct MenuItem {
-  const char *label;
-  int joyChange;
-  int energyChange;
-  int fullnessChange;
-  PetReaction reaction;
-};
-
-const MenuItem MENU_ITEMS[] = {
-  {"NAP",   1,  18, -4, NAP_REACTION},   // top: sleep and emit Zs
-  {"PLAY", 12, -9, -5, RUN_REACTION},    // right: two fast laps + hearts
-  {"FEED",  3,  2,  18, JUMP_REACTION},  // bottom: wiggle and jump
-  {"PET",   7,  0,  0, HEART_REACTION},  // left: jump and emit hearts
-};
-const int MENU_ITEM_COUNT = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
-
-// --- Movement feel --------------------------------------------------------
-// Bigger MENU_TILT_LIMIT makes the menu ball move less.
-const float MENU_TILT_LIMIT = 6.0f;
-
-// MPU6050 orientation: change these settings instead of rewiring your board.
-// 1. If the sensor is turned 90 degrees, set SWAP_MPU_AXES to true.
-// 2. If a direction feels backwards, change that direction from 1.0f to -1.0f.
-const bool SWAP_MPU_AXES = false;
-const float MENU_X_DIRECTION = 1.0f;
-const float MENU_Y_DIRECTION = -1.0f;
-
-// A small dead zone makes the ball rest in the center until the board is tilted.
-const float MENU_CENTER_DEADZONE = 0.8f;
-const float SHAKE_THRESHOLD = 7.0f;
-
-// Shake is the only movement that has an effect outside the radial menu.
-const int SHAKE_JOY_CHANGE = 5;
-const int SHAKE_ENERGY_CHANGE = -2;
-const int SHAKE_FULLNESS_CHANGE = -1;
-
-// --- Your pet's bitmap and animation -------------------------------------
-// This is a simplified 32 by 32, one-bit version of the supplied character.
-// You can replace it with your own art later; keep these size values matched
-// to the sprite array you paste in.
-const int PET_SPRITE_WIDTH = 32;
-const int PET_SPRITE_HEIGHT = 32;
-
-// The pet wanders unless it is asleep. A non-nap action does a tiny shake,
-// then a jump, except PLAY which runs two fast laps.
-const uint16_t PET_WALK_PIXEL_MS = 70;
-const uint16_t PET_PRE_JUMP_MS = 230;
-const uint16_t PET_JUMP_MS = 430;
-const int PET_JUMP_HEIGHT = 16;
-const uint32_t NAP_DURATION_MS = 48000;  // 48 seconds: four times the old nap.
-const uint16_t HEARTS_DURATION_MS = 1600;
-const uint16_t PLAY_LAP_MS = 800;
-const uint8_t PLAY_LAP_COUNT = 2;
-
-// Each byte stores eight pixels, left to right. This sparse outline keeps the
-// supplied creature readable on a tiny, one-bit OLED: head, eye, legs, tail,
-// and a small flower-like ear accent all stay separate instead of becoming a blob.
-const uint8_t PROGMEM PET_SPRITE[] = {
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x70, 0x0a, 0x00,
-  0x00, 0xf8, 0x1f, 0x00,
-  0x00, 0x8c, 0x3f, 0x80,
-  0x00, 0x43, 0xff, 0x00,
-  0x00, 0x43, 0xff, 0x00,
-  0x00, 0x30, 0x7e, 0x00,
-  0x00, 0x98, 0x01, 0x00,
-  0x01, 0x98, 0x01, 0x80,
-  0x03, 0x00, 0x10, 0xc0,
-  0x03, 0x04, 0x00, 0xc0,
-  0x01, 0x8b, 0x01, 0x80,
-  0x01, 0xcb, 0x03, 0x80,
-  0x03, 0xc0, 0x03, 0xc0,
-  0x03, 0xc0, 0x03, 0xc0,
-  0x01, 0xc0, 0x03, 0x80,
-  0x01, 0x80, 0x01, 0x80,
-  0x00, 0x60, 0x06, 0x00,
-  0x00, 0x3f, 0xfc, 0x00,
-  0x00, 0x7f, 0xfe, 0x00,
-  0x00, 0x70, 0x0e, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00,
-};
-// ===========================================================================
-// You can read below without needing to understand every line. The rest of
-// the sketch handles buttons, sensors, drawing, WiFi and saving automatically.
-
-const int SCREEN_WIDTH = 128;
-const int SCREEN_HEIGHT = 64;
-const int MENU_CENTER_X = 64;
-const int MENU_CENTER_Y = 32;
-const int MENU_ITEM_X[] = {64, 108, 64, 20};
-const int MENU_ITEM_Y[] = {12, 32, 53, 32};
-const int MENU_BALL_X_RANGE = 37;
-const int MENU_BALL_Y_RANGE = 22;
-const uint16_t BUTTON_DEBOUNCE_MS = 30;
-const uint16_t MPU_READ_INTERVAL_MS = 30;
-const uint16_t DHT_READ_INTERVAL_MS = 2200;
-const uint16_t SHAKE_COOLDOWN_MS = 650;
-const float STANDARD_GRAVITY = 9.80665f;
-
-Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
 Adafruit_MPU6050 mpu;
 DHT dht(DHT_PIN, DHT11);
-Preferences preferences;
+Preferences prefs;
 
-struct PetState {
-  int joy;
-  int energy;
-  int fullness;
-};
-
-struct ButtonState {
-  int pin;
-  bool stableState;
-  bool lastRawState;
-  uint32_t lastChangedAt;
-};
-
-enum View {
-  PET_VIEW,
-  MENU_VIEW,
-  STATS_VIEW,
-  STOCKS_VIEW,
-};
-
-PetState pet = {STARTING_JOY, STARTING_ENERGY, STARTING_FULLNESS};
-ButtonState buttonOne = {BUTTON_ONE_PIN, HIGH, HIGH, 0};
-ButtonState buttonTwo = {BUTTON_TWO_PIN, HIGH, HIGH, 0};
-View currentView = PET_VIEW;
-
-bool mpuFound = false;
-bool dhtFound = false;
-float accelerationX = 0.0f;
-float accelerationY = 0.0f;
-float accelerationZ = STANDARD_GRAVITY;
-float temperatureC = NAN;
-float humidity = NAN;
-float menuBallX = MENU_CENTER_X;
-float menuBallY = MENU_CENTER_Y;
-float menuCenterAccelerationX = 0.0f;
-float menuCenterAccelerationY = 0.0f;
-int selectedMenuItem = -1;
-uint32_t lastMpuReadAt = 0;
-uint32_t lastDhtReadAt = 0;
-uint32_t lastShakeAt = 0;
-uint32_t shakeAnimationEndsAt = 0;
-uint32_t petJumpStartedAt = 0;
-uint32_t nappingUntil = 0;
-uint32_t heartAnimationEndsAt = 0;
-uint32_t playRunStartedAt = 0;
-int nappingPetX = 0;
-
-// ------------------------------- Stock data --------------------------------
-const int TICKER_COUNT = sizeof(TICKERS) / sizeof(TICKERS[0]);
-const int MAX_SPARK_POINTS = 64;   // Points kept per ticker for the sparkline.
-const int MAX_RAW_POINTS = 256;    // Most candles we will read from one reply.
+// ------------------------------- types ---------------------------------------
+enum View { V_CAR = 0, V_DRIVE, V_STOCKS, V_STATS, V_COUNT };
+enum NetState { NET_IDLE = 0, NET_CONNECTING, NET_FETCHING, NET_OK, NET_ERR };
+enum BtnEvent { EV_NONE = 0, EV_SHORT, EV_LONG };
 
 struct StockData {
-  bool valid;
-  float price;
-  float previousClose;
-  int pointCount;
-  float points[MAX_SPARK_POINTS];
+  bool     valid;
+  float    price;
+  float    prevClose;
+  uint8_t  n;
+  float    pts[POINTS];
+  uint32_t updatedAt;
 };
 
-enum NetStatus {
-  NET_CONNECTING,
-  NET_ONLINE,
-  NET_ERROR,
+struct Button {
+  uint8_t  pin;
+  bool     down;
+  bool     longFired;
+  uint32_t changedAt;
+  uint32_t pressedAt;
 };
 
-// The WiFi work runs in its own background task so the pet and menu never
-// freeze while a download is in progress. This lock keeps the two tasks from
-// reading and writing the same numbers at the same instant.
-portMUX_TYPE stockLock = portMUX_INITIALIZER_UNLOCKED;
-StockData stocks[TICKER_COUNT];
-volatile NetStatus netStatus = NET_CONNECTING;
-int currentTicker = 0;
-uint32_t lastTickerChangeAt = 0;
+struct Obstacle {
+  float   x, y;
+  uint8_t w, h;
+  bool    on;
+};
 
-int petWalkingX(uint32_t now);
+// ------------------------------- state ---------------------------------------
+View view = V_CAR;
+bool mpuOk = false;
 
-int keepInRange(int value, int smallest, int largest) {
-  return constrain(value, smallest, largest);
+// steering
+float   biasRate   = 0;      // gyro bias (deg/s)
+float   angleRaw   = 0;      // filtered board angle (deg)
+float   angleZero  = 0;      // re-centre offset
+float   wheelDeg   = 0;      // angle drawn on screen, clockwise positive
+float   rollDeg = 0, pitchDeg = 0;
+uint32_t lastImu = 0;
+
+// environment
+float tempC = NAN, hum = NAN;
+uint32_t lastDht = 0;
+
+// stocks (written by background task, read by UI)
+StockData stocks[8];
+portMUX_TYPE stockMux = portMUX_INITIALIZER_UNLOCKED;
+volatile uint8_t netState = NET_IDLE;
+int tickerIdx = 0;
+
+// toast
+char     toastText[16] = "";
+uint32_t toastUntil = 0;
+
+// talking
+char     msgLines[3][21];
+int      msgTotal = 0;
+uint32_t msgStart = 0;
+uint32_t nextAutoSay = 0;
+uint8_t  sayCycle = 0;
+
+// buttons
+Button b1 = { BTN1_PIN, false, false, 0, 0 };
+Button b2 = { BTN2_PIN, false, false, 0, 0 };
+
+// game
+Obstacle obs[4];
+float    gameSpeed = 40, gameDist = 0, roadScroll = 0, spawnTimer = 0;
+bool     gameOver = false;
+int      bestScore = 0;
+const int ROAD_L = 32, ROAD_R = 100, ROAD_C = 66;
+const int PLAYER_Y = 46;
+
+// ------------------------------- helpers -------------------------------------
+float wrap180(float a) {
+  while (a > 180.0f)  a -= 360.0f;
+  while (a < -180.0f) a += 360.0f;
+  return a;
 }
 
-void changePet(int joyChange, int energyChange, int fullnessChange) {
-  pet.joy = keepInRange(pet.joy + joyChange, 0, 100);
-  pet.energy = keepInRange(pet.energy + energyChange, 0, 100);
-  pet.fullness = keepInRange(pet.fullness + fullnessChange, 0, 100);
+float clampf(float v, float lo, float hi) {
+  if (v < lo) return lo;
+  if (v > hi) return hi;
+  return v;
 }
 
-void loadPet() {
-  preferences.begin("starbie", false);
-  if (RESET_SAVED_PET_ON_BOOT) {
-    preferences.clear();
-  }
-  pet.joy = preferences.getInt("joy", STARTING_JOY);
-  pet.energy = preferences.getInt("energy", STARTING_ENERGY);
-  pet.fullness = preferences.getInt("full", STARTING_FULLNESS);
+void showToast(const char* t) {
+  strncpy(toastText, t, sizeof(toastText) - 1);
+  toastText[sizeof(toastText) - 1] = 0;
+  toastUntil = millis() + 800;
 }
 
-void savePet() {
-  preferences.putInt("joy", pet.joy);
-  preferences.putInt("energy", pet.energy);
-  preferences.putInt("full", pet.fullness);
+// ------------------------------- stocks --------------------------------------
+void getStock(int i, StockData& out) {
+  portENTER_CRITICAL(&stockMux);
+  out = stocks[i];
+  portEXIT_CRITICAL(&stockMux);
 }
 
-void setUpButton(ButtonState &button) {
-  pinMode(button.pin, INPUT_PULLUP);
-  button.stableState = digitalRead(button.pin);
-  button.lastRawState = button.stableState;
-  button.lastChangedAt = millis();
-}
-
-// Returns true exactly once for each press, even if the switch bounces.
-bool wasPressed(ButtonState &button) {
-  const bool rawState = digitalRead(button.pin);
-  const uint32_t now = millis();
-
-  if (rawState != button.lastRawState) {
-    button.lastRawState = rawState;
-    button.lastChangedAt = now;
-  }
-
-  if (rawState != button.stableState &&
-      now - button.lastChangedAt >= BUTTON_DEBOUNCE_MS) {
-    button.stableState = rawState;
-    return button.stableState == LOW;
-  }
-
-  return false;
-}
-
-void updateMpu() {
-  if (!mpuFound || millis() - lastMpuReadAt < MPU_READ_INTERVAL_MS) {
-    return;
-  }
-  lastMpuReadAt = millis();
-
-  sensors_event_t acceleration;
-  sensors_event_t gyro;
-  sensors_event_t sensorTemperature;
-  mpu.getEvent(&acceleration, &gyro, &sensorTemperature);
-  accelerationX = acceleration.acceleration.x;
-  accelerationY = acceleration.acceleration.y;
-  accelerationZ = acceleration.acceleration.z;
-}
-
-void updateDht() {
-  if (!dhtFound || millis() - lastDhtReadAt < DHT_READ_INTERVAL_MS) {
-    return;
-  }
-  lastDhtReadAt = millis();
-
-  const float newHumidity = dht.readHumidity();
-  const float newTemperatureC = dht.readTemperature();
-  if (!isnan(newHumidity)) {
-    humidity = newHumidity;
-  }
-  if (!isnan(newTemperatureC)) {
-    temperatureC = newTemperatureC;
-  }
-}
-
-// ------------------------- Stock downloading (NEW) -------------------------
-// Asks Yahoo Finance for today's 15-minute candles for one symbol and fills
-// in `result`. Returns false if anything goes wrong.
-bool fetchStock(const char *symbol, StockData &result) {
-  String encodedSymbol = symbol;
-  encodedSymbol.replace("^", "%5E");  // Index symbols start with ^.
-  const String url =
-      String("https://query1.finance.yahoo.com/v8/finance/chart/") +
-      encodedSymbol + "?interval=15m&range=1d";
-
+bool fetchStock(const char* sym, StockData& out) {
   WiFiClientSecure client;
-  client.setInsecure();  // Skips certificate checking: fine for public prices.
-
+  client.setInsecure();                       // fine for a hobby display
   HTTPClient http;
   http.setTimeout(8000);
+  http.useHTTP10(true);                       // avoids chunked encoding so the JSON stream parses
   http.setUserAgent("Mozilla/5.0");
-  if (!http.begin(client, url)) {
-    return false;
-  }
-  const int httpCode = http.GET();
-  if (httpCode != HTTP_CODE_OK) {
-    Serial.printf("%s: HTTP %d\n", symbol, httpCode);
-    http.end();
-    return false;
-  }
-  const String body = http.getString();
-  http.end();
 
-  // Only keep the few fields we need so the JSON fits easily in memory.
+  char url[160];
+  snprintf(url, sizeof(url),
+           "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=15m&range=1d", sym);
+  if (!http.begin(client, url)) return false;
+
+  int code = http.GET();
+  if (code != 200) { http.end(); return false; }
+
   JsonDocument filter;
   filter["chart"]["result"][0]["meta"]["regularMarketPrice"] = true;
   filter["chart"]["result"][0]["meta"]["chartPreviousClose"] = true;
-  filter["chart"]["result"][0]["meta"]["previousClose"] = true;
   filter["chart"]["result"][0]["indicators"]["quote"][0]["close"] = true;
 
   JsonDocument doc;
-  const DeserializationError error =
-      deserializeJson(doc, body, DeserializationOption::Filter(filter));
-  if (error) {
-    Serial.printf("%s: JSON error %s\n", symbol, error.c_str());
-    return false;
+  DeserializationError err =
+      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (err) return false;
+
+  JsonObject r = doc["chart"]["result"][0];
+  if (r.isNull()) return false;
+
+  float price = r["meta"]["regularMarketPrice"] | 0.0f;
+  float prev  = r["meta"]["chartPreviousClose"] | 0.0f;
+  if (price <= 0) return false;
+  if (prev <= 0) prev = price;
+
+  // collect valid closes (Yahoo puts null for empty intervals)
+  static float tmp[120];
+  int cnt = 0;
+  JsonArray closes = r["indicators"]["quote"][0]["close"];
+  for (JsonVariant v : closes) {
+    if (v.isNull()) continue;
+    if (cnt < 120) tmp[cnt++] = v.as<float>();
   }
 
-  JsonObject meta = doc["chart"]["result"][0]["meta"];
-  if (meta.isNull() || meta["regularMarketPrice"].isNull()) {
-    return false;
+  out.valid     = true;
+  out.price     = price;
+  out.prevClose = prev;
+  out.updatedAt = millis();
+  if (cnt <= POINTS) {
+    for (int i = 0; i < cnt; i++) out.pts[i] = tmp[i];
+    out.n = cnt;
+  } else {                                     // down-sample to POINTS
+    for (int i = 0; i < POINTS; i++) out.pts[i] = tmp[(i * (cnt - 1)) / (POINTS - 1)];
+    out.n = POINTS;
   }
-  const float price = meta["regularMarketPrice"];
-  float previousClose = meta["chartPreviousClose"] | 0.0f;
-  if (previousClose <= 0.0f) {
-    previousClose = meta["previousClose"] | 0.0f;
-  }
-  if (previousClose <= 0.0f) {
-    previousClose = price;
-  }
-
-  // Collect today's closing prices (Yahoo uses null for empty candles).
-  static float raw[MAX_RAW_POINTS];
-  int rawCount = 0;
-  JsonArray closes = doc["chart"]["result"][0]["indicators"]["quote"][0]["close"];
-  for (JsonVariant value : closes) {
-    if (!value.isNull() && rawCount < MAX_RAW_POINTS - 1) {
-      raw[rawCount++] = value.as<float>();
-    }
-  }
-  raw[rawCount++] = price;  // The newest point is the live price.
-
-  // Shrink to at most MAX_SPARK_POINTS so it fits the screen.
-  result.pointCount = 0;
-  if (rawCount <= MAX_SPARK_POINTS) {
-    for (int i = 0; i < rawCount; i++) {
-      result.points[result.pointCount++] = raw[i];
-    }
-  } else {
-    for (int i = 0; i < MAX_SPARK_POINTS; i++) {
-      const int source = (i * (rawCount - 1)) / (MAX_SPARK_POINTS - 1);
-      result.points[result.pointCount++] = raw[source];
-    }
-  }
-  result.price = price;
-  result.previousClose = previousClose;
-  result.valid = true;
+  if (out.n > 0) out.pts[out.n - 1] = price;   // last point = live price
   return true;
 }
 
-bool connectToWifi() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
-  netStatus = NET_CONNECTING;
-  WiFi.disconnect();
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  for (int attempt = 0; attempt < 40; attempt++) {  // Up to about 20 seconds.
-    if (WiFi.status() == WL_CONNECTED) {
-      return true;
-    }
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-  }
-  return false;
+bool connectWifi() {
+  if (WiFi.status() == WL_CONNECTED) return true;
+  netState = NET_CONNECTING;
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  uint32_t t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) vTaskDelay(200 / portTICK_PERIOD_MS);
+  return WiFi.status() == WL_CONNECTED;
 }
 
-// Runs forever in the background: connect, refresh every ticker, then sleep.
-void stockTask(void *unused) {
+// runs on its own FreeRTOS task so the screen never freezes while the network is slow
+void stockTask(void*) {
   for (;;) {
-    if (!connectToWifi()) {
-      netStatus = NET_ERROR;
-      vTaskDelay(10000 / portTICK_PERIOD_MS);
+    if (!connectWifi()) {
+      netState = NET_ERR;
+      vTaskDelay(15000 / portTICK_PERIOD_MS);
       continue;
     }
-
-    bool anySuccess = false;
-    for (int i = 0; i < TICKER_COUNT; i++) {
-      StockData fresh;
-      memset(&fresh, 0, sizeof(fresh));
-      if (fetchStock(TICKERS[i], fresh)) {
-        portENTER_CRITICAL(&stockLock);
-        stocks[i] = fresh;
-        portEXIT_CRITICAL(&stockLock);
-        anySuccess = true;
+    bool anyFail = false;
+    for (int i = 0; i < NUM_TICKERS; i++) {
+      netState = NET_FETCHING;
+      StockData tmp;
+      memset(&tmp, 0, sizeof(tmp));
+      if (fetchStock(TICKERS[i], tmp)) {
+        portENTER_CRITICAL(&stockMux);
+        stocks[i] = tmp;
+        portEXIT_CRITICAL(&stockMux);
+      } else {
+        anyFail = true;
       }
-      vTaskDelay(300 / portTICK_PERIOD_MS);
+      vTaskDelay(400 / portTICK_PERIOD_MS);
     }
-    netStatus = anySuccess ? NET_ONLINE : NET_ERROR;
-    vTaskDelay(STOCK_REFRESH_MS / portTICK_PERIOD_MS);
+    netState = anyFail ? NET_ERR : NET_OK;
+    vTaskDelay((anyFail ? 15000 : 60000) / portTICK_PERIOD_MS);   // retry fast on failure
   }
 }
 
-void nextTicker() {
-  currentTicker = (currentTicker + 1) % TICKER_COUNT;
-  lastTickerChangeAt = millis();
-}
-
-// ------------------------------ Pet behaviour ------------------------------
-int petWalkingX(uint32_t now) {
-  const int farthestX = SCREEN_WIDTH - PET_SPRITE_WIDTH;
-  const uint32_t roundTrip = static_cast<uint32_t>(farthestX) * 2;
-  const uint32_t step = (now / PET_WALK_PIXEL_MS) % roundTrip;
-  return step <= farthestX ? step : roundTrip - step;
-}
-
-uint32_t playRunDuration() {
-  return static_cast<uint32_t>(PLAY_LAP_MS) * PLAY_LAP_COUNT;
-}
-
-bool isNapping() {
-  return nappingUntil != 0 && millis() < nappingUntil;
-}
-
-bool isPlaying() {
-  return playRunStartedAt != 0 && millis() - playRunStartedAt < playRunDuration();
-}
-
-int playRunX(uint32_t now) {
-  const int farthestX = SCREEN_WIDTH - PET_SPRITE_WIDTH;
-  const uint32_t lapAge = (now - playRunStartedAt) % PLAY_LAP_MS;
-  const float progress = static_cast<float>(lapAge) / PLAY_LAP_MS;
-  return progress < 0.5f ? static_cast<int>(progress * 2.0f * farthestX)
-                         : static_cast<int>((1.0f - progress) * 2.0f * farthestX);
-}
-
-void updatePetTimers() {
-  if (nappingUntil != 0 && !isNapping()) {
-    nappingUntil = 0;  // The pet wakes naturally when its nap time is over.
+// ------------------------------- sensors -------------------------------------
+void calibrateGyro() {
+  if (!mpuOk) return;
+  float sum = 0;
+  const int N = 150;
+  for (int i = 0; i < N; i++) {
+    sensors_event_t a, g, t;
+    mpu.getEvent(&a, &g, &t);
+#if STEER_UPRIGHT
+    sum += g.gyro.z;
+#else
+    sum += g.gyro.x;
+#endif
+    delay(4);
   }
-  if (playRunStartedAt != 0 && !isPlaying()) {
-    playRunStartedAt = 0;  // PLAY is exactly two left-to-right-to-left laps.
-  }
+  biasRate = (sum / N) * RAD_TO_DEG;
 }
 
-// While the menu is open, the MPU6050 acts like a tiny air mouse. The position
-// at the instant Button 1 opens the menu becomes the center for that menu use.
-void updateMenuBall() {
-  float xTilt = accelerationX - menuCenterAccelerationX;
-  float yTilt = accelerationY - menuCenterAccelerationY;
+void updateImu() {
+  uint32_t now = micros();
+  float dt = (now - lastImu) / 1000000.0f;
+  lastImu = now;
+  if (dt <= 0 || dt > 0.2f) dt = 0.03f;
 
-  if (SWAP_MPU_AXES) {
-    const float oldXTilt = xTilt;
-    xTilt = yTilt;
-    yTilt = oldXTilt;
-  }
-  xTilt = constrain(xTilt * MENU_X_DIRECTION, -MENU_TILT_LIMIT, MENU_TILT_LIMIT);
-  yTilt = constrain(yTilt * MENU_Y_DIRECTION, -MENU_TILT_LIMIT, MENU_TILT_LIMIT);
-  const float targetX = MENU_CENTER_X + (xTilt / MENU_TILT_LIMIT) * MENU_BALL_X_RANGE;
-  const float targetY = MENU_CENTER_Y + (yTilt / MENU_TILT_LIMIT) * MENU_BALL_Y_RANGE;
-
-  // This small amount of smoothing makes the ball feel less jittery.
-  menuBallX += (targetX - menuBallX) * 0.20f;
-  menuBallY += (targetY - menuBallY) * 0.20f;
-
-  // The menu has four full sectors, not four tiny targets. Any tilt direction
-  // past the center dead zone selects its matching top/right/bottom/left action.
-  if (fabsf(xTilt) < MENU_CENTER_DEADZONE && fabsf(yTilt) < MENU_CENTER_DEADZONE) {
-    selectedMenuItem = -1;
-  } else if (fabsf(xTilt) > fabsf(yTilt)) {
-    selectedMenuItem = xTilt > 0.0f ? 1 : 3;  // right or left
-  } else {
-    selectedMenuItem = yTilt > 0.0f ? 2 : 0;  // bottom or top
-  }
-}
-
-void checkForShake() {
-  if (!mpuFound || currentView != PET_VIEW) {
+  if (!mpuOk) {                                // no sensor: wiggle so the demo still looks alive
+    wheelDeg = 35.0f * sinf(millis() / 900.0f);
+    rollDeg = wheelDeg; pitchDeg = 0;
     return;
   }
 
-  const float magnitude = sqrtf(accelerationX * accelerationX +
-                                accelerationY * accelerationY +
-                                accelerationZ * accelerationZ);
-  const uint32_t now = millis();
-  if (fabsf(magnitude - STANDARD_GRAVITY) >= SHAKE_THRESHOLD &&
-      now - lastShakeAt >= SHAKE_COOLDOWN_MS) {
-    lastShakeAt = now;
-    nappingUntil = 0;  // A shake wakes a sleeping pet right away.
-    shakeAnimationEndsAt = now + 350;
-    changePet(SHAKE_JOY_CHANGE, SHAKE_ENERGY_CHANGE, SHAKE_FULLNESS_CHANGE);
-    savePet();
+  sensors_event_t a, g, t;
+  mpu.getEvent(&a, &g, &t);
+
+  float rate, accAng, inPlane;
+#if STEER_UPRIGHT
+  rate    = g.gyro.z * RAD_TO_DEG - biasRate;
+  accAng  = atan2f(a.acceleration.x, a.acceleration.y) * RAD_TO_DEG;
+  inPlane = hypotf(a.acceleration.x, a.acceleration.y);
+#else
+  rate    = g.gyro.x * RAD_TO_DEG - biasRate;
+  accAng  = atan2f(a.acceleration.y, a.acceleration.z) * RAD_TO_DEG;
+  inPlane = hypotf(a.acceleration.y, a.acceleration.z);
+#endif
+  float mag = sqrtf(a.acceleration.x * a.acceleration.x + a.acceleration.y * a.acceleration.y +
+                    a.acceleration.z * a.acceleration.z);
+
+  // complementary filter: trust the gyro for fast moves, the accelerometer to stop drift
+  angleRaw = wrap180(angleRaw + GYRO_SIGN * rate * dt);
+  bool accOk = (inPlane > 4.0f) && (fabsf(mag - 9.81f) < 2.5f);
+  if (accOk) angleRaw = wrap180(angleRaw + 0.04f * wrap180(accAng - angleRaw));
+
+  wheelDeg = wrap180(STEER_SIGN * (angleRaw - angleZero));
+
+  rollDeg  = atan2f(a.acceleration.y, a.acceleration.z) * RAD_TO_DEG;
+  pitchDeg = atan2f(-a.acceleration.x, hypotf(a.acceleration.y, a.acceleration.z)) * RAD_TO_DEG;
+}
+
+void recenter() {
+  angleZero = angleRaw;
+  showToast("CENTERED");
+}
+
+void updateDht() {
+  if (millis() - lastDht < 2500) return;
+  lastDht = millis();
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  if (!isnan(t)) tempC = t;
+  if (!isnan(h)) hum = h;
+}
+
+// ------------------------------- buttons -------------------------------------
+BtnEvent readButton(Button& b) {
+  bool raw = (digitalRead(b.pin) == LOW);
+  uint32_t now = millis();
+  BtnEvent ev = EV_NONE;
+  if (raw != b.down && now - b.changedAt > 25) {          // debounce
+    b.changedAt = now;
+    b.down = raw;
+    if (raw) { b.pressedAt = now; b.longFired = false; }
+    else if (!b.longFired) ev = EV_SHORT;
+  }
+  if (b.down && !b.longFired && now - b.pressedAt > 700) {
+    b.longFired = true;
+    ev = EV_LONG;
+  }
+  return ev;
+}
+
+// ------------------------------- talking -------------------------------------
+void say(const char* s) {
+  memset(msgLines, 0, sizeof(msgLines));
+  int line = 0, col = 0;
+  const char* p = s;
+  while (*p && line < 3) {
+    const char* e = p;
+    while (*e && *e != ' ') e++;
+    int wl = e - p;
+    if (col > 0 && col + 1 + wl > 20) { line++; col = 0; if (line >= 3) break; }
+    if (col > 0) msgLines[line][col++] = ' ';
+    for (int i = 0; i < wl && col < 20; i++) msgLines[line][col++] = p[i];
+    msgLines[line][col] = 0;
+    p = e;
+    while (*p == ' ') p++;
+  }
+  msgTotal = 0;
+  for (int i = 0; i < 3; i++) msgTotal += strlen(msgLines[i]);
+  msgStart = millis();
+  nextAutoSay = millis() + 3500 + msgTotal * 35 + 2500;
+}
+
+bool isTalking() {
+  return (int)((millis() - msgStart) / 35) < msgTotal;
+}
+
+const char* QUIPS[] = {
+  "Vroom! Ready when you are.",
+  "Tilt me and I steer!",
+  "Mind the gap. And the market.",
+  "Buy the dip? Ask a human.",
+  "Poke me with BTN2!",
+  "I run on gyros, not gas.",
+  "Hold BTN1 to re-centre me.",
+  "Try DRIVE mode. I dare you."
+};
+const int NUM_QUIPS = 8;
+
+void stockQuip() {
+  char buf[64];
+  StockData s;
+  getStock(tickerIdx, s);
+  if (!s.valid) {
+    if (netState == NET_ERR) say("No market data. Check my WiFi?");
+    else say("Fetching the market...");
+    return;
+  }
+  float pct = (s.price - s.prevClose) / s.prevClose * 100.0f;
+  if (pct > 1.0f)       snprintf(buf, sizeof(buf), "%s is up %.1f%%! Floor it!", TICKERS[tickerIdx], pct);
+  else if (pct < -1.0f) snprintf(buf, sizeof(buf), "%s down %.1f%%. Brake!", TICKERS[tickerIdx], -pct);
+  else                  snprintf(buf, sizeof(buf), "%s flat at %.2f. Cruising.", TICKERS[tickerIdx], s.price);
+  say(buf);
+}
+
+void autoSay() {
+  char buf[64];
+  switch (sayCycle++ % 4) {
+    case 0: stockQuip(); break;
+    case 1:
+      if (!isnan(tempC)) { snprintf(buf, sizeof(buf), "It is %.0f C in here. %.0f%% humid.", tempC, hum); say(buf); }
+      else say(QUIPS[random(NUM_QUIPS)]);
+      break;
+    case 2:
+      if (fabsf(wheelDeg) > 25) say(wheelDeg > 0 ? "Whoa, turning right!" : "Whoa, turning left!");
+      else say(QUIPS[random(NUM_QUIPS)]);
+      break;
+    default: say(QUIPS[random(NUM_QUIPS)]); break;
   }
 }
 
-void openMenu() {
-  currentView = MENU_VIEW;
-  selectedMenuItem = -1;
-  menuBallX = MENU_CENTER_X;
-  menuBallY = MENU_CENTER_Y;
-  // Calibrate here so every menu starts from however the builder is holding it.
-  menuCenterAccelerationX = accelerationX;
-  menuCenterAccelerationY = accelerationY;
+// ------------------------------- drawing -------------------------------------
+void drawWheel(int cx, int cy, int r, float deg) {
+  float a = deg * DEG_TO_RAD;                         // positive = clockwise on screen
+  display.drawCircle(cx, cy, r, SSD1306_WHITE);
+  if (r > 8)  display.drawCircle(cx, cy, r - 1, SSD1306_WHITE);
+  if (r > 16) display.drawCircle(cx, cy, r - 2, SSD1306_WHITE);
+  const float spokes[3] = { 0.0f, 1.5708f, 3.1416f };  // right, bottom, left  (T-shape at 0 deg)
+  for (int i = 0; i < 3; i++) {
+    int x = cx + (int)roundf(cosf(a + spokes[i]) * (r - 2));
+    int y = cy + (int)roundf(sinf(a + spokes[i]) * (r - 2));
+    display.drawLine(cx, cy, x, y, SSD1306_WHITE);
+  }
+  int hub = r / 4; if (hub < 2) hub = 2;
+  display.fillCircle(cx, cy, hub, SSD1306_WHITE);
+  // 12 o'clock marker so you can see the rotation
+  int mx = cx + (int)roundf(cosf(a - 1.5708f) * r);
+  int my = cy + (int)roundf(sinf(a - 1.5708f) * r);
+  display.fillCircle(mx, my, r > 12 ? 2 : 1, SSD1306_WHITE);
 }
 
-void chooseMenuItem() {
-  if (selectedMenuItem == -1) {
-    return;  // Keep the menu open until the ball reaches a choice.
+void drawCarFace() {
+  // cabin + body
+  display.drawRoundRect(18, 33, 48, 13, 4, SSD1306_WHITE);
+  display.drawRoundRect(6, 44, 72, 18, 5, SSD1306_WHITE);
+  // wheels
+  display.fillRoundRect(10, 60, 14, 4, 1, SSD1306_WHITE);
+  display.fillRoundRect(60, 60, 14, 4, 1, SSD1306_WHITE);
+
+  // headlight eyes, pupils follow the steering
+  int px = (int)clampf(wheelDeg / 15.0f, -3, 3);
+  bool blink = (millis() % 3600) < 130;
+  const int ex[2] = { 24, 60 };
+  for (int i = 0; i < 2; i++) {
+    display.drawCircle(ex[i], 51, 6, SSD1306_WHITE);
+    if (blink) display.drawFastHLine(ex[i] - 4, 51, 9, SSD1306_WHITE);
+    else       display.fillCircle(ex[i] + px, 51, 2, SSD1306_WHITE);
   }
 
-  const MenuItem &item = MENU_ITEMS[selectedMenuItem];
-  changePet(item.joyChange, item.energyChange, item.fullnessChange);
-  savePet();
-  const uint32_t now = millis();
-  nappingUntil = 0;
-  heartAnimationEndsAt = 0;
-  playRunStartedAt = 0;
-
-  if (item.reaction == NAP_REACTION) {
-    petJumpStartedAt = 0;
-    nappingPetX = petWalkingX(now);
-    nappingUntil = now + NAP_DURATION_MS;
-  } else if (item.reaction == RUN_REACTION) {
-    petJumpStartedAt = 0;
-    playRunStartedAt = now;
-    heartAnimationEndsAt = now + playRunDuration();
+  // mouth: flaps while talking, small smile when idle
+  if (isTalking()) {
+    int open = 1 + (millis() / 90) % 4;
+    display.fillRoundRect(34, 54, 16, open + 1, 1, SSD1306_WHITE);
   } else {
-    // A confirmed action gets a little anticipation shake before the jump.
-    petJumpStartedAt = now;
-    if (item.reaction == HEART_REACTION) {
-      heartAnimationEndsAt = now + HEARTS_DURATION_MS;
+    display.drawFastHLine(36, 56, 12, SSD1306_WHITE);
+    display.drawPixel(35, 55, SSD1306_WHITE);
+    display.drawPixel(48, 55, SSD1306_WHITE);
+  }
+}
+
+void drawBubble() {
+  display.drawRoundRect(0, 0, 128, 31, 4, SSD1306_WHITE);
+  display.fillTriangle(44, 30, 56, 30, 48, 36, SSD1306_BLACK);      // tail
+  display.drawLine(44, 30, 48, 36, SSD1306_WHITE);
+  display.drawLine(56, 30, 48, 36, SSD1306_WHITE);
+
+  int remaining = (int)((millis() - msgStart) / 35);
+  display.setTextSize(1);
+  for (int i = 0; i < 3; i++) {
+    int len = strlen(msgLines[i]);
+    if (len == 0) continue;
+    int n = remaining < len ? remaining : len;
+    if (n > 0) {
+      char tmp[21];
+      memcpy(tmp, msgLines[i], n);
+      tmp[n] = 0;
+      display.setCursor(4, 3 + i * 9);
+      display.print(tmp);
+    }
+    remaining -= len;
+    if (remaining <= 0) break;
+  }
+}
+
+void drawCarView() {
+  drawBubble();
+  drawCarFace();
+  drawWheel(106, 48, 14, wheelDeg);
+}
+
+// ---- game ----
+void gameReset() {
+  for (int i = 0; i < 4; i++) obs[i].on = false;
+  gameSpeed = 45; gameDist = 0; roadScroll = 0; spawnTimer = 0.6f;
+  gameOver = false;
+}
+
+void gameUpdate(float dt) {
+  if (gameOver) return;
+  gameSpeed = 45.0f + gameDist * 0.12f;
+  if (gameSpeed > 120) gameSpeed = 120;
+  gameDist   += gameSpeed * dt * 0.2f;
+  roadScroll += gameSpeed * dt;
+
+  spawnTimer -= dt;
+  if (spawnTimer <= 0) {
+    for (int i = 0; i < 4; i++) {
+      if (!obs[i].on) {
+        obs[i].w = 10 + random(8);
+        obs[i].h = 12;
+        obs[i].x = ROAD_L + 3 + random(ROAD_R - ROAD_L - 6 - obs[i].w);
+        obs[i].y = -12;
+        obs[i].on = true;
+        break;
+      }
+    }
+    spawnTimer = 0.45f + random(40) / 100.0f - gameSpeed / 400.0f;
+    if (spawnTimer < 0.25f) spawnTimer = 0.25f;
+  }
+
+  float px = ROAD_C + clampf(wheelDeg, -45, 45) / 45.0f * 28.0f;
+  float pl = px - 4, pr = px + 4;
+  for (int i = 0; i < 4; i++) {
+    if (!obs[i].on) continue;
+    obs[i].y += gameSpeed * dt;
+    if (obs[i].y > SCREEN_H) { obs[i].on = false; continue; }
+    float ol = obs[i].x, orr = obs[i].x + obs[i].w;
+    if (pr > ol && pl < orr && PLAYER_Y + 13 > obs[i].y && PLAYER_Y < obs[i].y + obs[i].h) {
+      gameOver = true;
+      if ((int)gameDist > bestScore) {
+        bestScore = (int)gameDist;
+        prefs.putInt("best", bestScore);
+      }
     }
   }
-  currentView = PET_VIEW;
+}
+
+void drawDriveView() {
+  // road edges + scrolling centre dashes
+  display.drawFastVLine(ROAD_L, 0, SCREEN_H, SSD1306_WHITE);
+  display.drawFastVLine(ROAD_R, 0, SCREEN_H, SSD1306_WHITE);
+  int off = (int)roadScroll % 16;
+  for (int y = -16 + off; y < SCREEN_H; y += 16) display.drawFastVLine(ROAD_C, y, 8, SSD1306_WHITE);
+
+  for (int i = 0; i < 4; i++) {
+    if (!obs[i].on) continue;
+    int x = (int)obs[i].x, y = (int)obs[i].y;
+    display.drawRect(x, y, obs[i].w, obs[i].h, SSD1306_WHITE);
+    display.fillRect(x + 2, y + obs[i].h - 5, obs[i].w - 4, 2, SSD1306_WHITE);
+  }
+
+  int px = ROAD_C + (int)(clampf(wheelDeg, -45, 45) / 45.0f * 28.0f);
+  display.fillRoundRect(px - 4, PLAYER_Y, 9, 14, 2, SSD1306_WHITE);
+  display.fillRect(px - 2, PLAYER_Y + 3, 5, 3, SSD1306_BLACK);
+
+  // HUD
+  display.setTextSize(1);
+  display.setCursor(0, 0);  display.print("SCORE");
+  display.setCursor(0, 9);  display.print((int)gameDist);
+  display.setCursor(0, 24); display.print("BEST");
+  display.setCursor(0, 33); display.print(bestScore);
+  drawWheel(116, 52, 9, wheelDeg);
+
+  if (gameOver) {
+    display.fillRect(28, 18, 72, 28, SSD1306_BLACK);
+    display.drawRect(28, 18, 72, 28, SSD1306_WHITE);
+    display.setCursor(48, 23); display.print("CRASH!");
+    display.setCursor(33, 35); display.print("BTN2: retry");
+  }
+}
+
+// ---- stocks ----
+void drawArrow(int x, int y, bool up) {
+  if (up) display.fillTriangle(x, y + 12, x + 12, y + 12, x + 6, y, SSD1306_WHITE);
+  else    display.fillTriangle(x, y, x + 12, y, x + 6, y + 12, SSD1306_WHITE);
+}
+
+void drawSparkline(const StockData& s, int x0, int y0, int w, int h) {
+  if (s.n < 2) return;
+  float mn = s.prevClose, mx = s.prevClose;
+  for (int i = 0; i < s.n; i++) {
+    if (s.pts[i] < mn) mn = s.pts[i];
+    if (s.pts[i] > mx) mx = s.pts[i];
+  }
+  float minRange = s.prevClose * 0.006f;               // keep flat stocks looking calm
+  if (mx - mn < minRange) {
+    float mid = (mx + mn) / 2;
+    mx = mid + minRange / 2; mn = mid - minRange / 2;
+  }
+  auto ypos = [&](float v) { return y0 + h - 1 - (int)((v - mn) / (mx - mn) * (h - 1)); };
+
+  int yp = ypos(s.prevClose);                           // dotted previous-close line
+  for (int x = x0; x < x0 + w; x += 4) display.drawPixel(x, yp, SSD1306_WHITE);
+
+  int lx = x0, ly = ypos(s.pts[0]);
+  for (int i = 1; i < s.n; i++) {
+    int x = x0 + (i * (w - 1)) / (s.n - 1);
+    int y = ypos(s.pts[i]);
+    display.drawLine(lx, ly, x, y, SSD1306_WHITE);
+    lx = x; ly = y;
+  }
+  display.fillCircle(lx, ly, 1, SSD1306_WHITE);
+}
+
+void drawStocksView() {
+  StockData s;
+  getStock(tickerIdx, s);
+
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(TICKERS[tickerIdx]);
+  display.print(" ");
+  display.print(tickerIdx + 1);
+  display.print("/");
+  display.print(NUM_TICKERS);
+
+  // status, top right
+  char st[16];
+  if (s.valid && netState != NET_CONNECTING) {
+    uint32_t age = (millis() - s.updatedAt) / 1000;
+    if (age < 100) snprintf(st, sizeof(st), "%s%us", netState == NET_FETCHING ? "~" : "", (unsigned)age);
+    else           snprintf(st, sizeof(st), "%um", (unsigned)(age / 60));
+  } else {
+    strcpy(st, netState == NET_ERR ? "NO NET" : (netState == NET_CONNECTING ? "WIFI.." : "LOAD.."));
+  }
+  display.setCursor(128 - strlen(st) * 6, 0);
+  display.print(st);
+
+  if (!s.valid) {
+    display.setCursor(10, 28);
+    display.print(netState == NET_ERR ? "Check WiFi / SSID" : "Getting prices...");
+    return;
+  }
+
+  float chg = s.price - s.prevClose;
+  float pct = chg / s.prevClose * 100.0f;
+  bool up = chg >= 0;
+
+  char buf[20];
+  if (s.price >= 1000) snprintf(buf, sizeof(buf), "%.1f", s.price);
+  else                 snprintf(buf, sizeof(buf), "%.2f", s.price);
+  display.setTextSize(2);
+  display.setCursor(0, 10);
+  display.print(buf);
+
+  drawArrow(108, 11, up);
+
+  display.setTextSize(1);
+  snprintf(buf, sizeof(buf), "%+.2f  %+.2f%%", chg, pct);
+  display.setCursor(0, 28);
+  display.print(buf);
+
+  drawSparkline(s, 0, 40, 128, 24);
+}
+
+// ---- stats ----
+void drawStatsView() {
+  char buf[24];
+  display.setTextSize(1);
+  display.setCursor(0, 0);  display.print("STATS");
+
+  display.setCursor(0, 12);
+  if (isnan(tempC)) display.print("Temp: --");
+  else { snprintf(buf, sizeof(buf), "Temp: %.1f C", tempC); display.print(buf); }
+  display.setCursor(0, 22);
+  if (isnan(hum)) display.print("Hum:  --");
+  else { snprintf(buf, sizeof(buf), "Hum:  %.0f %%", hum); display.print(buf); }
+
+  snprintf(buf, sizeof(buf), "R%+.0f P%+.0f", rollDeg, pitchDeg);
+  display.setCursor(0, 32); display.print(buf);
+  snprintf(buf, sizeof(buf), "Wheel: %+.0f deg", wheelDeg);
+  display.setCursor(0, 42); display.print(buf);
+
+  // steering bar
+  display.drawRect(0, 54, 128, 9, SSD1306_WHITE);
+  display.drawFastVLine(64, 54, 9, SSD1306_WHITE);
+  int bx = 64 + (int)(clampf(wheelDeg, -90, 90) / 90.0f * 60.0f);
+  display.fillRect(bx - 2, 56, 5, 5, SSD1306_WHITE);
+
+  drawWheel(108, 22, 14, wheelDeg);
+}
+
+void drawToast() {
+  if (millis() > toastUntil) return;
+  int w = strlen(toastText) * 6 + 8;
+  int x = (128 - w) / 2;
+  display.fillRect(x, 24, w, 14, SSD1306_WHITE);
+  display.setTextColor(SSD1306_BLACK);
+  display.setCursor(x + 4, 27);
+  display.print(toastText);
+  display.setTextColor(SSD1306_WHITE);
+}
+
+// ------------------------------- views / input --------------------------------
+void setView(View v) {
+  view = v;
+  static const char* names[] = { "CAR", "DRIVE", "STOCKS", "STATS" };
+  showToast(names[v]);
+  if (v == V_DRIVE) gameReset();
+  if (v == V_CAR) say("Hi! I'm Starbie.");
 }
 
 void handleButtons() {
-  if (wasPressed(buttonOne)) {
-    if (currentView == MENU_VIEW) {
-      chooseMenuItem();
-    } else if (currentView == STOCKS_VIEW) {
-      nextTicker();  // On the stock screen Button 1 flips through tickers.
-    } else {
-      openMenu();
+  BtnEvent e1 = readButton(b1);
+  BtnEvent e2 = readButton(b2);
+
+  if (e1 == EV_SHORT) setView((View)((view + 1) % V_COUNT));
+  if (e1 == EV_LONG)  recenter();
+
+  if (e2 == EV_SHORT) {
+    switch (view) {
+      case V_CAR:
+        if (random(2)) stockQuip(); else say(QUIPS[random(NUM_QUIPS)]);
+        break;
+      case V_DRIVE:
+        if (gameOver) gameReset();
+        break;
+      case V_STOCKS:
+        tickerIdx = (tickerIdx + 1) % NUM_TICKERS;
+        break;
+      case V_STATS:
+        recenter();
+        break;
+      default: break;
     }
   }
-
-  if (wasPressed(buttonTwo)) {
-    // Button 2 never changes the pet. It only moves between screens.
-    switch (currentView) {
-      case STOCKS_VIEW: currentView = PET_VIEW; break;
-      case PET_VIEW:    currentView = STATS_VIEW; break;
-      case STATS_VIEW:  currentView = STOCKS_VIEW; break;
-      default:          currentView = PET_VIEW; break;  // Leaving the menu.
-    }
-    lastTickerChangeAt = millis();
-  }
-
-  // Hands-free mode: rotate through the watchlist while the stock screen is up.
-  if (currentView == STOCKS_VIEW && AUTO_ROTATE_MS > 0 && TICKER_COUNT > 1 &&
-      millis() - lastTickerChangeAt >= AUTO_ROTATE_MS) {
-    nextTicker();
+  if (e2 == EV_LONG && view == V_STOCKS) {
+    tickerIdx = (tickerIdx + NUM_TICKERS - 1) % NUM_TICKERS;
   }
 }
 
-// -------------------------------- Drawing ---------------------------------
-// Special effect: a little sparkle that blinks behind the pet as it walks.
-void drawSparkle(int x, int y) {
-  display.drawPixel(x, y - 2, SSD1306_WHITE);
-  display.drawPixel(x - 1, y - 1, SSD1306_WHITE);
-  display.drawPixel(x + 1, y - 1, SSD1306_WHITE);
-  display.drawPixel(x - 2, y, SSD1306_WHITE);
-  display.drawPixel(x, y, SSD1306_WHITE);
-  display.drawPixel(x + 2, y, SSD1306_WHITE);
-  display.drawPixel(x - 1, y + 1, SSD1306_WHITE);
-  display.drawPixel(x + 1, y + 1, SSD1306_WHITE);
-  display.drawPixel(x, y + 2, SSD1306_WHITE);
-}
-
-void drawHeart(int x, int y) {
-  // A tiny seven-pixel-wide heart that stays crisp on the OLED.
-  display.fillRect(x - 2, y, 2, 2, SSD1306_WHITE);
-  display.fillRect(x + 1, y, 2, 2, SSD1306_WHITE);
-  display.fillRect(x - 3, y + 2, 7, 2, SSD1306_WHITE);
-  display.fillRect(x - 2, y + 4, 5, 1, SSD1306_WHITE);
-  display.fillRect(x - 1, y + 5, 3, 1, SSD1306_WHITE);
-  display.drawPixel(x, y + 6, SSD1306_WHITE);
-}
-
-void drawHearts(uint32_t now, int petX, int petY) {
-  if (now >= heartAnimationEndsAt) {
-    return;
-  }
-
-  const float progress =
-      1.0f - static_cast<float>(heartAnimationEndsAt - now) / HEARTS_DURATION_MS;
-  const int rise = static_cast<int>(progress * 18.0f);
-  drawHeart(petX + 10, petY - 3 - rise);
-  drawHeart(petX + 22, petY - 9 - rise / 2);
-}
-
-void drawSleepZs(uint32_t now, int petX, int petY) {
-  // The Zs float upward, then loop back down while the pet is napping.
-  const int rise = static_cast<int>((now / 300UL) % 15UL);
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(petX + 23, petY - 2 - rise);
-  display.print("z");
-  display.setCursor(petX + 28, petY - 8 - rise / 2);
-  display.print("z");
-}
-
-void drawPet() {
-  display.clearDisplay();
-
-  const uint32_t now = millis();
-  int petX = isNapping() ? nappingPetX : petWalkingX(now);
-  if (isPlaying()) {
-    petX = playRunX(now);
-  }
-  int petY = SCREEN_HEIGHT - PET_SPRITE_HEIGHT;
-
-  // The pet always wanders except during a nap; PLAY temporarily takes over.
-  if (now < shakeAnimationEndsAt) {
-    petX += static_cast<int>(sinf(now / 18.0f) * 3.0f);
-  }
-
-  if (!isNapping() && petJumpStartedAt != 0) {
-    const uint32_t animationAge = now - petJumpStartedAt;
-
-    if (animationAge < PET_PRE_JUMP_MS) {
-      petX += static_cast<int>(sinf(now / 16.0f) * 3.0f);
-    } else if (animationAge < PET_PRE_JUMP_MS + PET_JUMP_MS) {
-      const float jumpProgress =
-          static_cast<float>(animationAge - PET_PRE_JUMP_MS) / PET_JUMP_MS;
-      petY -= static_cast<int>(sinf(jumpProgress * PI) * PET_JUMP_HEIGHT);
-    } else {
-      petJumpStartedAt = 0;
-    }
-  }
-
-  petX = constrain(petX, 0, SCREEN_WIDTH - PET_SPRITE_WIDTH);
-  display.drawBitmap(petX, petY, PET_SPRITE, PET_SPRITE_WIDTH, PET_SPRITE_HEIGHT,
-                     SSD1306_WHITE);
-
-  if (!isNapping() && (now / 250) % 2 == 0) {
-    drawSparkle(petX - 4, petY + 18);
-  }
-
-  if (isNapping()) {
-    drawSleepZs(now, petX, petY);
-  }
-  drawHearts(now, petX, petY);
-}
-
-void drawMenuItem(int item) {
-  const int boxWidth = 33;
-  const int boxHeight = 12;
-  const int boxX = MENU_ITEM_X[item] - boxWidth / 2;
-  const int boxY = MENU_ITEM_Y[item] - boxHeight / 2;
-  const bool isSelected = item == selectedMenuItem;
-
-  if (isSelected) {
-    display.fillRoundRect(boxX, boxY, boxWidth, boxHeight, 3, SSD1306_WHITE);
-    display.setTextColor(SSD1306_BLACK);
-  } else {
-    display.drawRoundRect(boxX, boxY, boxWidth, boxHeight, 3, SSD1306_WHITE);
-    display.setTextColor(SSD1306_WHITE);
-  }
-
-  display.setTextSize(1);
-  const int labelLength = strlen(MENU_ITEMS[item].label);
-  display.setCursor(MENU_ITEM_X[item] - labelLength * 3, MENU_ITEM_Y[item] - 3);
-  display.print(MENU_ITEMS[item].label);
-  display.setTextColor(SSD1306_WHITE);
-}
-
-void drawMenu() {
-  display.clearDisplay();
-  // The two diagonal lines divide the screen into four big selection sectors.
-  display.drawLine(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, SSD1306_WHITE);
-  display.drawLine(0, SCREEN_HEIGHT - 1, SCREEN_WIDTH - 1, 0, SSD1306_WHITE);
-  for (int item = 0; item < MENU_ITEM_COUNT; item++) {
-    drawMenuItem(item);
-  }
-
-  display.drawCircle(MENU_CENTER_X, MENU_CENTER_Y, 11, SSD1306_WHITE);
-  display.fillCircle(static_cast<int>(menuBallX), static_cast<int>(menuBallY), 4,
-                     SSD1306_WHITE);
-}
-
-void drawStatBar(int y, const char *label, int value) {
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(4, y);
-  display.print(label);
-  display.drawRect(48, y, 57, 8, SSD1306_WHITE);
-  display.fillRect(49, y + 1, map(value, 0, 100, 0, 55), 6, SSD1306_WHITE);
-  display.setCursor(109, y);
-  display.print(value);
-}
-
-void drawStats() {
-  display.clearDisplay();
-  drawStatBar(5, "JOY", pet.joy);
-  drawStatBar(20, "ENERGY", pet.energy);
-  drawStatBar(35, "FULL", pet.fullness);
-
-  display.setCursor(4, 53);
-  if (!isnan(temperatureC)) {
-    display.print("TEMP ");
-    display.print(static_cast<int>(temperatureC));
-    display.print("C");
-  } else {
-    display.print("TEMP --");
-  }
-
-  display.setCursor(76, 53);
-  if (!isnan(humidity)) {
-    display.print("H ");
-    display.print(static_cast<int>(humidity));
-    display.print("%");
-  } else {
-    display.print("H --");
-  }
-}
-
-// Draws a small filled triangle: pointing up for gains, down for losses.
-void drawArrow(int x, int y, bool up) {
-  if (up) {
-    display.fillTriangle(x, y + 6, x + 3, y, x + 6, y + 6, SSD1306_WHITE);
-  } else {
-    display.fillTriangle(x, y, x + 3, y + 6, x + 6, y, SSD1306_WHITE);
-  }
-}
-
-// Draws today's price line in the area under the numbers, with a dotted line
-// where yesterday's close was so you can see if you are above or below it.
-void drawSparkline(const StockData &stock) {
-  const int left = 0;
-  const int right = SCREEN_WIDTH - 1;
-  const int top = 40;
-  const int bottom = SCREEN_HEIGHT - 1;
-
-  if (stock.pointCount < 2) {
-    return;
-  }
-
-  float lowest = stock.previousClose;
-  float highest = stock.previousClose;
-  for (int i = 0; i < stock.pointCount; i++) {
-    lowest = min(lowest, stock.points[i]);
-    highest = max(highest, stock.points[i]);
-  }
-  float range = highest - lowest;
-  if (range < 0.0001f) {
-    range = 1.0f;  // A perfectly flat line: avoid dividing by zero.
-  }
-
-  auto yFor = [&](float value) {
-    return bottom - static_cast<int>(((value - lowest) / range) * (bottom - top));
-  };
-
-  const int previousCloseY = yFor(stock.previousClose);
-  for (int x = left; x <= right; x += 4) {
-    display.drawPixel(x, previousCloseY, SSD1306_WHITE);
-  }
-
-  int lastX = left;
-  int lastY = yFor(stock.points[0]);
-  for (int i = 1; i < stock.pointCount; i++) {
-    const int x = left + (i * (right - left)) / (stock.pointCount - 1);
-    const int y = yFor(stock.points[i]);
-    display.drawLine(lastX, lastY, x, y, SSD1306_WHITE);
-    lastX = x;
-    lastY = y;
-  }
-  display.fillCircle(lastX, lastY, 2, SSD1306_WHITE);  // Dot on the latest price.
-}
-
-void drawStocks() {
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-
-  StockData stock;
-  portENTER_CRITICAL(&stockLock);
-  stock = stocks[currentTicker];
-  portEXIT_CRITICAL(&stockLock);
-
-  display.setCursor(0, 0);
-  display.print(TICKERS[currentTicker]);
-
-  if (!stock.valid) {
-    display.setCursor(0, 26);
-    if (netStatus == NET_ERROR) {
-      display.print("No data. Check WiFi");
-      display.setCursor(0, 38);
-      display.print("name, password and");
-      display.setCursor(0, 50);
-      display.print("ticker symbols.");
-    } else {
-      display.print("Loading prices...");
-    }
-    return;
-  }
-
-  const float change = stock.price - stock.previousClose;
-  const float percent = (stock.previousClose > 0.0f)
-                            ? (change / stock.previousClose) * 100.0f
-                            : 0.0f;
-  const bool isUp = change >= 0.0f;
-
-  // Top right: arrow and percent change.
-  char percentText[12];
-  snprintf(percentText, sizeof(percentText), "%+.2f%%", percent);
-  const int percentX = SCREEN_WIDTH - static_cast<int>(strlen(percentText)) * 6;
-  drawArrow(percentX - 9, 1, isUp);
-  display.setCursor(percentX, 0);
-  display.print(percentText);
-
-  // Big price.
-  char priceText[16];
-  if (stock.price >= 100000.0f) {
-    snprintf(priceText, sizeof(priceText), "%.0f", stock.price);
-  } else if (stock.price >= 1000.0f) {
-    snprintf(priceText, sizeof(priceText), "%.1f", stock.price);
-  } else {
-    snprintf(priceText, sizeof(priceText), "%.2f", stock.price);
-  }
-  display.setTextSize(2);
-  display.setCursor(0, 11);
-  display.print(priceText);
-  display.setTextSize(1);
-
-  // Dollar change on the left, ticker position on the right.
-  char changeText[16];
-  snprintf(changeText, sizeof(changeText), "%+.2f today", change);
-  display.setCursor(0, 29);
-  display.print(changeText);
-
-  if (TICKER_COUNT > 1) {
-    char positionText[8];
-    snprintf(positionText, sizeof(positionText), "%d/%d", currentTicker + 1,
-             TICKER_COUNT);
-    display.setCursor(SCREEN_WIDTH - static_cast<int>(strlen(positionText)) * 6, 29);
-    display.print(positionText);
-  }
-
-  drawSparkline(stock);
-}
-
-void drawCurrentView() {
-  if (currentView == MENU_VIEW) {
-    drawMenu();
-  } else if (currentView == STATS_VIEW) {
-    drawStats();
-  } else if (currentView == STOCKS_VIEW) {
-    drawStocks();
-  } else {
-    drawPet();
-  }
-  display.display();
-}
-
+// ------------------------------- setup / loop ---------------------------------
 void setup() {
   Serial.begin(115200);
-  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
-  setUpButton(buttonOne);
-  setUpButton(buttonTwo);
-  loadPet();
+  pinMode(BTN1_PIN, INPUT_PULLUP);
+  pinMode(BTN2_PIN, INPUT_PULLUP);
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
-    Serial.println("OLED not found. Check power, GND, SDA, SCL, and address.");
-    while (true) {
-      delay(10);
-    }
+  Wire.begin(SDA_PIN, SCL_PIN);
+  Wire.setClock(400000);                               // fast I2C = smoother animation
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+    Serial.println("OLED not found - check SDA/SCL and address");
+    for (;;) delay(1000);
   }
+  display.setTextWrap(false);
+  display.setTextColor(SSD1306_WHITE);
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setCursor(18, 20); display.print("Starbie waking up");
+  display.setCursor(18, 34); display.print("Keep me still...");
+  display.display();
 
-  mpuFound = mpu.begin(MPU6050_ADDRESS, &Wire);
-  if (mpuFound) {
-    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+  mpuOk = mpu.begin(0x68, &Wire);
+  if (mpuOk) {
+    mpu.setAccelerometerRange(MPU6050_RANGE_4_G);
     mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+    mpu.setFilterBandwidth(MPU6050_BAND_44_HZ);
+    calibrateGyro();
   } else {
-    Serial.println("MPU6050 not found. The menu will not move until it is connected.");
+    Serial.println("MPU6050 not found - steering demo mode");
   }
 
-  if (USE_DHT11) {
-    dht.begin();
-    dhtFound = true;
-  }
+  dht.begin();
+  prefs.begin("starbie", false);
+  bestScore = prefs.getInt("best", 0);
 
-  // Start the background WiFi + stock task. It needs a big stack for HTTPS.
-  WiFi.mode(WIFI_STA);
-  xTaskCreate(stockTask, "stocks", 16384, nullptr, 1, nullptr);
+  randomSeed(micros());
+  lastImu = micros();
 
-  currentView = START_ON_STOCKS ? STOCKS_VIEW : PET_VIEW;
-  lastTickerChangeAt = millis();
-  drawCurrentView();
+  xTaskCreate(stockTask, "stocks", 12288, nullptr, 1, nullptr);
+
+  gameReset();
+  say("Hi! I'm Starbie.");
+  showToast("CAR");
 }
 
 void loop() {
-  updateMpu();
+  static uint32_t lastFrame = 0;
+  uint32_t now = millis();
+  if (now - lastFrame < 28) return;                    // ~30 fps cap
+  float dt = (now - lastFrame) / 1000.0f;
+  lastFrame = now;
+  if (dt > 0.2f) dt = 0.03f;
+
+  updateImu();
   updateDht();
-  updatePetTimers();
   handleButtons();
 
-  if (currentView == MENU_VIEW) {
-    updateMenuBall();
-  } else {
-    checkForShake();
-  }
+  if (view == V_CAR && now > nextAutoSay && !isTalking()) autoSay();
+  if (view == V_DRIVE) gameUpdate(dt);
 
-  drawCurrentView();
-  delay(16);  // Smooth display updates without making the code complicated.
+  display.clearDisplay();
+  switch (view) {
+    case V_CAR:    drawCarView();    break;
+    case V_DRIVE:  drawDriveView();  break;
+    case V_STOCKS: drawStocksView(); break;
+    case V_STATS:  drawStatsView();  break;
+    default: break;
+  }
+  drawToast();
+  display.display();
 }
